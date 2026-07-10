@@ -6,6 +6,8 @@ import { RecordPage } from "./salesforce/RecordPage";
 import { HomePage } from "./salesforce/HomePage";
 import { ReportPage } from "./salesforce/ReportPage";
 import { AgentforceDock } from "./salesforce/AgentforceDock";
+import { ExploriPanel } from "./explori/ExploriPanel";
+import { useApiData, type PanelKind } from "./hooks/useApiData";
 
 const tabForObject: Record<string, string> = {
   Account: "Accounts",
@@ -19,7 +21,74 @@ const params = new URLSearchParams(window.location.search);
 const paramScene = scenes.find((s) => s.id === params.get("scene"));
 const captureMode = params.get("capture") === "1";
 
+// Canvas iframe mode: /?mode=iframe renders ONLY the Explori panel, full
+// viewport, no sidebar/chrome. With ?panel=<kind> it loads live data from the
+// /api/ routes (see useApiData) instead of fixtures/scenes.ts.
+const iframeMode = params.get("mode") === "iframe";
+const panelKinds: PanelKind[] = ["portfolio-pulse", "account", "opportunity", "lead-known"];
+const rawPanelParam = params.get("panel");
+const panelParam: PanelKind | null = panelKinds.includes(rawPanelParam as PanelKind)
+  ? (rawPanelParam as PanelKind)
+  : null;
+const exhibitorParam = params.get("exhibitor") ?? undefined;
+const eventParam = params.get("event") ?? undefined;
+const companyParam = params.get("company") ?? undefined;
+
 export default function App() {
+  if (iframeMode) {
+    return <IframeApp />;
+  }
+  return <WireframeApp />;
+}
+
+// ------------------------------------------------------------ Iframe render
+function IframeApp() {
+  if (panelParam) {
+    return (
+      <IframeDataPanel
+        panelKind={panelParam}
+        exhibitor={exhibitorParam}
+        event={eventParam}
+        company={companyParam}
+      />
+    );
+  }
+
+  if (paramScene) {
+    return (
+      <div className="iframe-stage">
+        <ExploriPanel data={paramScene.panel} />
+      </div>
+    );
+  }
+
+  return <div className="iframe-stage" />;
+}
+
+function IframeDataPanel({
+  panelKind,
+  exhibitor,
+  event,
+  company,
+}: {
+  panelKind: PanelKind;
+  exhibitor?: string;
+  event?: string;
+  company?: string;
+}) {
+  const { data, loading, error } = useApiData(panelKind, { exhibitor, event, company });
+
+  return (
+    <div className="iframe-stage">
+      {loading && <div className="iframe-spinner" aria-label="Loading" />}
+      {!loading && error && <div className="iframe-error">{error}</div>}
+      {!loading && !error && data && <ExploriPanel data={data} />}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------- Wireframe render
+function WireframeApp() {
   const firstPopulated =
     personas.find((p) => scenes.some((s) => s.personaId === p.id))?.id ??
     personas[0].id;

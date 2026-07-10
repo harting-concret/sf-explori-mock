@@ -10,16 +10,28 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
+// Builds the SPA redirect for Canvas iframe mode from the custom parameters
+// set via Apex (panel, exhibitor, event, company). Defaults to the
+// Portfolio Pulse panel when no panel parameter is provided.
+function buildCanvasRedirectUrl(parameters = {}) {
+  const panel = parameters.panel || "portfolio-pulse";
+  const params = new URLSearchParams({ mode: "iframe", panel });
+  if (parameters.exhibitor) params.set("exhibitor", parameters.exhibitor);
+  if (parameters.event) params.set("event", parameters.event);
+  if (parameters.company) params.set("company", parameters.company);
+  return `/?${params.toString()}`;
+}
+
 // Salesforce Canvas posts here on load with a signed_request form field.
 // Verify it, then hand off to the SPA with enough context in the URL to
-// pick the right scene.
+// render the right Explori panel in iframe mode.
 app.post("/canvas", (req, res) => {
   let context;
 
   if (process.env.SKIP_AUTH === "true") {
     context = {
       environment: {
-        parameters: { sceneId: "sam-account" },
+        parameters: { panel: "portfolio-pulse" },
         record: { Id: "001000000000000", Name: "Mock Account" },
       },
       client: { instanceId: "mock" },
@@ -37,15 +49,18 @@ app.post("/canvas", (req, res) => {
 
   req.canvasContext = context;
 
-  const sceneId = context?.environment?.parameters?.sceneId || "sam-account";
-  const params = new URLSearchParams({ scene: sceneId });
-
-  const record = context?.environment?.record;
-  if (record?.Id) params.set("recordId", record.Id);
-  if (record?.Name) params.set("recordName", record.Name);
-
-  res.redirect(`/?${params.toString()}`);
+  const parameters = context?.environment?.parameters || {};
+  res.redirect(buildCanvasRedirectUrl(parameters));
 });
+
+// Dev-only convenience: hit /canvas directly with query params instead of
+// POSTing a signed_request, e.g.
+// GET /canvas?panel=account&exhibitor=Siemens%20AG&event=London%20Build%202025
+if (process.env.SKIP_AUTH === "true") {
+  app.get("/canvas", (req, res) => {
+    res.redirect(buildCanvasRedirectUrl(req.query));
+  });
+}
 
 app.get("/api/portfolio-pulse", async (req, res) => {
   try {
