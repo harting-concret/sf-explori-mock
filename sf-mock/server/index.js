@@ -10,6 +10,19 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
+// Real Salesforce signed_request payloads nest custom parameters under
+// context.environment.parameters. Our own mock context (SKIP_AUTH=true,
+// and the local test generator script) uses a simpler top-level shape
+// (environment.parameters) since it doesn't replicate the full Salesforce
+// payload. Support both so real org traffic and local test fixtures work.
+function extractParameters(context) {
+  return (
+    context?.context?.environment?.parameters ||
+    context?.environment?.parameters ||
+    {}
+  );
+}
+
 // Builds the SPA redirect for Canvas iframe mode from the custom parameters
 // set via Apex (panel, exhibitor, event, company). Defaults to the
 // Portfolio Pulse panel when no panel parameter is provided.
@@ -66,7 +79,8 @@ app.post("/canvas", (req, res) => {
 
   req.canvasContext = context;
 
-  const parameters = context?.environment?.parameters || {};
+  const parameters = extractParameters(context);
+  console.log("[canvas] extracted parameters:", parameters);
   res.redirect(buildCanvasRedirectUrl(parameters));
 });
 
