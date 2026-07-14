@@ -38,13 +38,30 @@ app.post("/canvas", (req, res) => {
     };
   } else {
     const signedRequest = req.body.signed_request;
+
+    // TEMP DIAGNOSTIC LOGGING — remove once the Invalid signed_request issue
+    // from real Salesforce traffic is root-caused. Confirms whether Salesforce
+    // is sending base64url (-, _, no padding) vs standard base64 (+, /, =).
+    console.log("[canvas] raw signed_request:", signedRequest);
+    if (signedRequest) {
+      const [sigPart, payloadPart] = signedRequest.split(".");
+      console.log("[canvas] signature part:", sigPart);
+      console.log("[canvas] payload part (first 100 chars):", payloadPart?.slice(0, 100));
+      console.log(
+        "[canvas] looks like base64url (has - or _ or missing padding):",
+        /[-_]/.test(signedRequest) || !signedRequest.includes("=")
+      );
+    }
+
     if (!signedRequest) {
       return res.status(401).send("Missing signed_request");
     }
     context = verifySignedRequest(signedRequest, process.env.CANVAS_CONSUMER_SECRET);
     if (!context) {
+      console.log("[canvas] verifySignedRequest returned null — signature mismatch or decode/parse failure");
       return res.status(401).send("Invalid signed_request");
     }
+    console.log("[canvas] signed_request verified successfully");
   }
 
   req.canvasContext = context;
