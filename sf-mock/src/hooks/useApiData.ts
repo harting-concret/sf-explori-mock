@@ -50,7 +50,12 @@ export function useApiData(
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const isIframeMode = new URLSearchParams(window.location.search).get("mode") === "iframe";
+  // Live data fetching is allowed either in query-param iframe mode
+  // (?mode=iframe) or the path-based Lead route (/lead/:company) --
+  // see App.tsx for where each is detected and IframeDataPanel is invoked.
+  const isIframeMode =
+    new URLSearchParams(window.location.search).get("mode") === "iframe" ||
+    /^\/lead\//.test(window.location.pathname);
 
   useEffect(() => {
     if (!isIframeMode || !panelKind) {

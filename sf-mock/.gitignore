@@ -3,3 +3,4 @@ dist
 .env
 test-canvas-auth-fullscreen.html
 test-canvas-auth.html
+seed_demo_accounts.sql

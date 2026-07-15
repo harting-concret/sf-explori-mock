@@ -34,7 +34,16 @@ const exhibitorParam = params.get("exhibitor") ?? undefined;
 const eventParam = params.get("event") ?? undefined;
 const companyParam = params.get("company") ?? undefined;
 
+// EXPERIMENT: Lead-known panel test for path-based URLs (/lead/:company)
+// instead of query params, e.g. /lead/Farmers%20Coop.%20of%20Florida.
+// See buildCanvasRedirectUrl in server/index.js for the matching redirect.
+const leadPathMatch = window.location.pathname.match(/^\/lead\/(.+)$/);
+const leadPathCompany = leadPathMatch ? decodeURIComponent(leadPathMatch[1]) : null;
+
 export default function App() {
+  if (leadPathCompany) {
+    return <IframeDataPanel panelKind="lead-known" company={leadPathCompany} />;
+  }
   if (iframeMode) {
     return <IframeApp />;
   }
@@ -103,9 +112,29 @@ function WireframeApp() {
   const personaScenes = scenes.filter((s) => s.personaId === personaId);
   const scene = scenes.find((s) => s.id === activeId);
 
+  // Demo-only: reflect the selected scene in the address bar for Lead
+  // scenes specifically (matches the real /lead/:company Canvas route),
+  // using pushState so it's just a display update, not a page reload.
+  // Any other scene resets back to "/" so the URL never shows a stale
+  // /lead/... path while a different scene is actually on screen.
+  function updateUrlForScene(target: typeof scene) {
+    if (target?.panel.kind === "lead-known") {
+      window.history.pushState(null, "", `/lead/${encodeURIComponent(target.panel.company)}`);
+    } else {
+      window.history.pushState(null, "", "/");
+    }
+  }
+
   function selectPersona(id: string) {
     setPersonaId(id);
-    setActiveId(scenes.find((s) => s.personaId === id)?.id);
+    const nextScene = scenes.find((s) => s.personaId === id);
+    setActiveId(nextScene?.id);
+    updateUrlForScene(nextScene);
+  }
+
+  function selectScene(id: string) {
+    setActiveId(id);
+    updateUrlForScene(scenes.find((s) => s.id === id));
   }
 
   const activeTab =
@@ -152,7 +181,7 @@ function WireframeApp() {
               className={
                 "harness__item" + (s.id === activeId ? " harness__item--active" : "")
               }
-              onClick={() => setActiveId(s.id)}
+              onClick={() => selectScene(s.id)}
             >
               <span
                 className={"harness__modedot harness__modedot--" + s.renderMode}
