@@ -13,6 +13,7 @@ export default defineConfig({
     proxy: {
       "/api": "http://localhost:3000",
       "/canvas": "http://localhost:3000",
+      "/oauth": "http://localhost:3000",
     },
   },
 });

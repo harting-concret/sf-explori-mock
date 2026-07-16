@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const path = require("path");
 const express = require("express");
+const session = require("express-session");
 const { verifySignedRequest } = require("./verifySignedRequest");
 const db = require("./db");
 
@@ -9,6 +10,25 @@ const app = express();
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+
+// POC: session used only to remember "this browser completed the Salesforce
+// OAuth popup" for the /oauth flow below. MemoryStore is fine for a POC;
+// swap for a real store (Redis, etc.) before this carries production load.
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET || "explori-oauth-poc-dev-secret",
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      // SameSite=None is only valid (browsers keep it) when paired with
+      // Secure, which requires HTTPS -- true for the real Salesforce iframe
+      // case (Heroku), not for local http://localhost testing.
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+      secure: process.env.NODE_ENV === "production",
+      maxAge: 30 * 60 * 1000,
+    },
+  })
+);
 
 // Real Salesforce signed_request payloads nest custom parameters under
 // context.environment.parameters. Our own mock context (SKIP_AUTH=true,
@@ -46,9 +66,187 @@ function buildCanvasRedirectUrl(parameters = {}) {
   return `/?${params.toString()}`;
 }
 
-// Salesforce Canvas posts here on load with a signed_request form field.
+// POC: Canvas OAuth (Get) access method. Salesforce loads this URL with a
+// plain GET, carrying the custom parameters (panel/exhibitor/event/company)
+// as query params instead of a signed_request. Until the browser has
+// completed the OAuth popup handshake, we can't trust the request at all,
+// so we serve a sign-in page instead of any panel data.
+const SF_LOGIN_URL = (process.env.SF_LOGIN_URL || "https://login.salesforce.com").replace(/\/+$/, "");
+const SF_OAUTH_CLIENT_ID = process.env.SF_OAUTH_CLIENT_ID;
+const SF_OAUTH_CLIENT_SECRET = process.env.SF_OAUTH_CLIENT_SECRET;
+
+// PKCE: this org's External Client App requires a code_challenge on the
+// authorize request (rejects with "missing required code_challenge"
+// otherwise). code_verifier is stashed in the session between the
+// /oauth/authorize redirect and the /oauth/callback token exchange --
+// the popup and the parent page share the same session cookie since
+// they're the same browser on the same origin.
+const crypto = require("crypto");
+
+function generateCodeVerifier() {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
+function deriveCodeChallenge(verifier) {
+  return crypto.createHash("sha256").update(verifier).digest("base64url");
+}
+
+// Must exactly match a Callback URL registered on the Connected App.
+// Explicit via env rather than derived from req.protocol/req.get("host") --
+// when testing through the Vite dev proxy (5173 -> 3000), the Host header
+// Express sees isn't reliably the one Salesforce needs to redirect back to.
+function oauthRedirectUri(req) {
+  return (
+    process.env.SF_OAUTH_REDIRECT_URI ||
+    `${req.protocol}://${req.get("host")}/oauth/callback`
+  );
+}
+
+// The original panel/company/etc. params have to survive the round trip
+// through Salesforce's login popup, so we carry them in `state`.
+function encodeState(parameters) {
+  return Buffer.from(JSON.stringify(parameters)).toString("base64url");
+}
+
+function decodeState(state) {
+  try {
+    return JSON.parse(Buffer.from(state, "base64url").toString("utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function renderSignInPage(parameters) {
+  const state = encodeState(parameters);
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Sign in to Explori</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; display: flex; align-items: center;
+    justify-content: center; height: 100vh; margin: 0; background: #f4f6f9; }
+  .card { text-align: center; padding: 2rem; max-width: 320px; }
+  button { padding: 0.7rem 1.4rem; font-size: 0.95rem; background: #0b5cab; color: #fff;
+    border: none; border-radius: 6px; cursor: pointer; }
+  button:hover { background: #094a8a; }
+  .error { color: #b00020; margin-top: 1rem; display: none; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <p>Sign in with Salesforce to view Explori Intelligence.</p>
+    <button id="signin">Sign in with Salesforce</button>
+    <p class="error" id="error">Sign-in failed or was cancelled. Please try again.</p>
+  </div>
+  <script>
+    var state = ${JSON.stringify(state)};
+    document.getElementById("signin").addEventListener("click", function () {
+      document.getElementById("error").style.display = "none";
+      window.open(
+        "/oauth/authorize?state=" + encodeURIComponent(state),
+        "explori-oauth",
+        "width=500,height=650"
+      );
+    });
+    window.addEventListener("message", function (event) {
+      if (!event.data || event.data.source !== "explori-oauth") return;
+      if (event.data.status === "success") {
+        window.location.href = event.data.redirectUrl;
+      } else {
+        document.getElementById("error").style.display = "block";
+      }
+    });
+  </script>
+</body>
+</html>`;
+}
+
+function renderCallbackResult(status, redirectUrl) {
+  return `<!DOCTYPE html>
+<html><body>
+<script>
+  if (window.opener) {
+    window.opener.postMessage(
+      { source: "explori-oauth", status: ${JSON.stringify(status)}, redirectUrl: ${JSON.stringify(redirectUrl || "")} },
+      "*"
+    );
+  }
+  window.close();
+</script>
+</body></html>`;
+}
+
+// Real Canvas entry point under the OAuth access method.
+app.get("/canvas", (req, res) => {
+  if (process.env.SKIP_AUTH === "true" || req.session.authorized) {
+    return res.redirect(buildCanvasRedirectUrl(req.query));
+  }
+  res.send(renderSignInPage(req.query));
+});
+
+app.get("/oauth/authorize", (req, res) => {
+  const codeVerifier = generateCodeVerifier();
+  req.session.codeVerifier = codeVerifier;
+
+  const authorizeUrl = new URL(`${SF_LOGIN_URL}/services/oauth2/authorize`);
+  authorizeUrl.searchParams.set("response_type", "code");
+  authorizeUrl.searchParams.set("client_id", SF_OAUTH_CLIENT_ID);
+  authorizeUrl.searchParams.set("redirect_uri", oauthRedirectUri(req));
+  authorizeUrl.searchParams.set("state", req.query.state || "");
+  authorizeUrl.searchParams.set("code_challenge", deriveCodeChallenge(codeVerifier));
+  authorizeUrl.searchParams.set("code_challenge_method", "S256");
+
+  // req.session.codeVerifier must be persisted before the redirect fires.
+  req.session.save(() => res.redirect(authorizeUrl.toString()));
+});
+
+app.get("/oauth/callback", async (req, res) => {
+  const { code, state, error } = req.query;
+  const parameters = state ? decodeState(state) : {};
+
+  if (error || !code) {
+    console.error("[oauth] authorize denied or missing code:", error);
+    return res.send(renderCallbackResult("error"));
+  }
+
+  try {
+    const tokenRes = await fetch(`${SF_LOGIN_URL}/services/oauth2/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        client_id: SF_OAUTH_CLIENT_ID,
+        client_secret: SF_OAUTH_CLIENT_SECRET,
+        redirect_uri: oauthRedirectUri(req),
+        code_verifier: req.session.codeVerifier || "",
+      }),
+    });
+
+    if (!tokenRes.ok) {
+      console.error("[oauth] token exchange failed:", await tokenRes.text());
+      return res.send(renderCallbackResult("error"));
+    }
+
+    const token = await tokenRes.json();
+    req.session.authorized = true;
+    req.session.accessToken = token.access_token;
+
+    res.send(renderCallbackResult("success", buildCanvasRedirectUrl(parameters)));
+  } catch (err) {
+    console.error("[oauth] callback error:", err);
+    res.send(renderCallbackResult("error"));
+  }
+});
+
+// Legacy Salesforce Canvas posts here on load with a signed_request form field.
 // Verify it, then hand off to the SPA with enough context in the URL to
 // render the right Explori panel in iframe mode.
+//
+// Kept in place (untouched) while the OAuth flow above is being tested --
+// the Canvas app's Access Method setting decides which one Salesforce
+// actually calls, so this stays dormant once that's flipped to OAuth (Get).
 app.post("/canvas", (req, res) => {
   let context;
 
@@ -80,15 +278,6 @@ app.post("/canvas", (req, res) => {
   console.log("[canvas] redirecting to:", redirectUrl);
   res.redirect(redirectUrl);
 });
-
-// Dev-only convenience: hit /canvas directly with query params instead of
-// POSTing a signed_request, e.g.
-// GET /canvas?panel=account&exhibitor=Siemens%20AG&event=London%20Build%202025
-if (process.env.SKIP_AUTH === "true") {
-  app.get("/canvas", (req, res) => {
-    res.redirect(buildCanvasRedirectUrl(req.query));
-  });
-}
 
 app.get("/api/portfolio-pulse", async (req, res) => {
   try {
