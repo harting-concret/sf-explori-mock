@@ -8,6 +8,14 @@ const db = require("./db");
 
 const app = express();
 
+// Heroku terminates TLS at its router and forwards plain HTTP to the dyno
+// (requests here always look like http, see tls=false in Heroku logs).
+// Without this, Express doesn't trust the X-Forwarded-Proto header, so
+// req.secure is always false -- which means express-session silently
+// refuses to set our `secure: true` session cookie at all, breaking the
+// OAuth code_verifier round trip in production.
+app.set("trust proxy", 1);
+
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
