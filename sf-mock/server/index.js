@@ -144,25 +144,52 @@ function renderSignInPage(parameters) {
 <body>
   <div class="card">
     <p>Sign in with Salesforce to view Explori Intelligence.</p>
-    <button id="signin">Sign in with Salesforce</button>
+    <button id="signin-webserver">Sign in (Web Server flow)</button>
+    <div style="height: 0.5rem;"></div>
+    <button id="signin-useragent">Sign in (User-Agent flow)</button>
     <p class="error" id="error">Sign-in failed or was cancelled. Please try again.</p>
   </div>
   <script>
     var state = ${JSON.stringify(state)};
-    document.getElementById("signin").addEventListener("click", function () {
+    function openPopup(flow) {
       document.getElementById("error").style.display = "none";
       window.open(
-        "/oauth/authorize?state=" + encodeURIComponent(state),
+        "/oauth/authorize?flow=" + flow + "&state=" + encodeURIComponent(state),
         "explori-oauth",
         "width=500,height=650"
       );
+    }
+    document.getElementById("signin-webserver").addEventListener("click", function () {
+      openPopup("web-server");
+    });
+    document.getElementById("signin-useragent").addEventListener("click", function () {
+      openPopup("user-agent");
     });
     window.addEventListener("message", function (event) {
       if (!event.data || event.data.source !== "explori-oauth") return;
-      if (event.data.status === "success") {
-        window.location.href = event.data.redirectUrl;
-      } else {
+
+      if (event.data.status !== "success") {
         document.getElementById("error").style.display = "block";
+        return;
+      }
+
+      if (event.data.accessToken) {
+        // User-Agent flow: the token only ever existed in the popup's URL
+        // fragment, which the server never saw. Hand it to the server now
+        // so it can mark this session authorized the same way the Web
+        // Server flow does after its own token exchange.
+        fetch("/oauth/mark-authorized", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ accessToken: event.data.accessToken, state: event.data.state }),
+        })
+          .then(function (res) { return res.json(); })
+          .then(function (body) { window.location.href = body.redirectUrl; })
+          .catch(function () {
+            document.getElementById("error").style.display = "block";
+          });
+      } else {
+        window.location.href = event.data.redirectUrl;
       }
     });
   </script>
@@ -209,6 +236,42 @@ function renderCallbackResult(status, redirectUrl, detail) {
 </body></html>`;
 }
 
+// User-Agent flow: Salesforce redirects here with the access token in the
+// URL fragment (#access_token=...), which browsers never send to the
+// server -- only client-side JS can read it. So this page's only job is
+// reading window.location.hash and reporting the result back to the opener.
+function renderFragmentHandlerPage() {
+  return `<!DOCTYPE html>
+<html><body style="font-family: monospace; padding: 1rem; word-break: break-all;">
+<p id="status">Completing sign-in...</p>
+<script>
+  var params = new URLSearchParams(window.location.hash.slice(1));
+  var accessToken = params.get("access_token");
+  var state = params.get("state");
+  var error = params.get("error");
+
+  if (window.opener) {
+    window.opener.postMessage(
+      {
+        source: "explori-oauth",
+        status: accessToken ? "success" : "error",
+        accessToken: accessToken,
+        state: state,
+      },
+      "*"
+    );
+  }
+
+  if (accessToken) {
+    window.close();
+  } else {
+    document.getElementById("status").textContent =
+      "error: " + (error || "no access_token in redirect fragment");
+  }
+</script>
+</body></html>`;
+}
+
 // Real Canvas entry point under the OAuth access method.
 app.get("/canvas", (req, res) => {
   if (process.env.SKIP_AUTH === "true" || req.session.authorized) {
@@ -218,14 +281,25 @@ app.get("/canvas", (req, res) => {
 });
 
 app.get("/oauth/authorize", (req, res) => {
-  const codeVerifier = generateCodeVerifier();
-  req.session.codeVerifier = codeVerifier;
+  const flow = req.query.flow === "user-agent" ? "user-agent" : "web-server";
 
   const authorizeUrl = new URL(`${SF_LOGIN_URL}/services/oauth2/authorize`);
-  authorizeUrl.searchParams.set("response_type", "code");
   authorizeUrl.searchParams.set("client_id", SF_OAUTH_CLIENT_ID);
   authorizeUrl.searchParams.set("redirect_uri", oauthRedirectUri(req));
   authorizeUrl.searchParams.set("state", req.query.state || "");
+
+  if (flow === "user-agent") {
+    // Implicit grant: token comes back directly in the redirect's URL
+    // fragment, never touches our server, no client_secret/PKCE involved.
+    authorizeUrl.searchParams.set("response_type", "token");
+    return res.redirect(authorizeUrl.toString());
+  }
+
+  // Web Server flow (default): authorization code + PKCE, exchanged
+  // server-side for a token in /oauth/callback below.
+  const codeVerifier = generateCodeVerifier();
+  req.session.codeVerifier = codeVerifier;
+  authorizeUrl.searchParams.set("response_type", "code");
   authorizeUrl.searchParams.set("code_challenge", deriveCodeChallenge(codeVerifier));
   authorizeUrl.searchParams.set("code_challenge_method", "S256");
 
@@ -233,9 +307,33 @@ app.get("/oauth/authorize", (req, res) => {
   req.session.save(() => res.redirect(authorizeUrl.toString()));
 });
 
+app.post("/oauth/mark-authorized", (req, res) => {
+  // User-Agent flow only: the browser already has the access token (from
+  // the URL fragment), our server never saw it. This just mirrors what the
+  // Web Server flow's /oauth/callback does after its own token exchange --
+  // mark the session authorized so /canvas's gate treats it the same way.
+  const { accessToken, state } = req.body || {};
+  if (!accessToken) {
+    return res.status(400).json({ error: "missing accessToken" });
+  }
+
+  req.session.authorized = true;
+  req.session.accessToken = accessToken;
+
+  const parameters = state ? decodeState(state) : {};
+  req.session.save(() => res.json({ redirectUrl: buildCanvasRedirectUrl(parameters) }));
+});
+
 app.get("/oauth/callback", async (req, res) => {
   const { code, state, error } = req.query;
   const parameters = state ? decodeState(state) : {};
+
+  // User-Agent flow: Salesforce appends the token as a URL fragment
+  // (#access_token=...), which never reaches the server -- no query
+  // params at all means this is that case, not a bare/broken request.
+  if (!code && !error && !Object.keys(req.query).length) {
+    return res.send(renderFragmentHandlerPage());
+  }
 
   if (error || !code) {
     const detail = `authorize denied/missing code: ${error || req.query.error_description || "no code param"}`;
