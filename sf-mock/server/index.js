@@ -162,9 +162,16 @@ function renderSignInPage(parameters) {
 </html>`;
 }
 
-function renderCallbackResult(status, redirectUrl) {
+// DEBUG (temporary, POC troubleshooting): shows the raw status/detail instead
+// of auto-closing immediately, so failures are visible in the popup itself
+// rather than only inferred from Heroku logs. Revert to auto-close once the
+// flow is confirmed working end to end.
+function renderCallbackResult(status, redirectUrl, detail) {
   return `<!DOCTYPE html>
-<html><body>
+<html><body style="font-family: monospace; padding: 1rem; word-break: break-all;">
+<p>status: ${JSON.stringify(status)}</p>
+<p>detail: ${JSON.stringify(detail || "(none)")}</p>
+<button id="closebtn">Close</button>
 <script>
   if (window.opener) {
     window.opener.postMessage(
@@ -172,7 +179,9 @@ function renderCallbackResult(status, redirectUrl) {
       "*"
     );
   }
-  window.close();
+  document.getElementById("closebtn").addEventListener("click", function () {
+    window.close();
+  });
 </script>
 </body></html>`;
 }
@@ -206,8 +215,9 @@ app.get("/oauth/callback", async (req, res) => {
   const parameters = state ? decodeState(state) : {};
 
   if (error || !code) {
-    console.error("[oauth] authorize denied or missing code:", error);
-    return res.send(renderCallbackResult("error"));
+    const detail = `authorize denied/missing code: ${error || req.query.error_description || "no code param"}`;
+    console.error("[oauth]", detail);
+    return res.send(renderCallbackResult("error", null, detail));
   }
 
   try {
@@ -225,8 +235,9 @@ app.get("/oauth/callback", async (req, res) => {
     });
 
     if (!tokenRes.ok) {
-      console.error("[oauth] token exchange failed:", await tokenRes.text());
-      return res.send(renderCallbackResult("error"));
+      const bodyText = await tokenRes.text();
+      console.error("[oauth] token exchange failed:", bodyText);
+      return res.send(renderCallbackResult("error", null, `token exchange failed: ${bodyText}`));
     }
 
     const token = await tokenRes.json();
@@ -236,7 +247,7 @@ app.get("/oauth/callback", async (req, res) => {
     res.send(renderCallbackResult("success", buildCanvasRedirectUrl(parameters)));
   } catch (err) {
     console.error("[oauth] callback error:", err);
-    res.send(renderCallbackResult("error"));
+    res.send(renderCallbackResult("error", null, `callback error: ${err.message}`));
   }
 });
 
