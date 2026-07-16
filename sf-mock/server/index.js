@@ -170,20 +170,35 @@ function renderSignInPage(parameters) {
 </html>`;
 }
 
-// DEBUG (temporary, POC troubleshooting): shows the raw status/detail instead
-// of auto-closing immediately, so failures are visible in the popup itself
-// rather than only inferred from Heroku logs. Revert to auto-close once the
-// flow is confirmed working end to end.
+// Success closes the popup immediately (real intended UX). Errors stay
+// visible with the raw detail instead of auto-closing -- still POC/testing
+// phase across panel types, and this saves another round of log-tailing
+// if a different panel/org config hits a new failure mode.
 function renderCallbackResult(status, redirectUrl, detail) {
+  if (status === "success") {
+    return `<!DOCTYPE html>
+<html><body>
+<script>
+  if (window.opener) {
+    window.opener.postMessage(
+      { source: "explori-oauth", status: "success", redirectUrl: ${JSON.stringify(redirectUrl || "")} },
+      "*"
+    );
+  }
+  window.close();
+</script>
+</body></html>`;
+  }
+
   return `<!DOCTYPE html>
 <html><body style="font-family: monospace; padding: 1rem; word-break: break-all;">
-<p>status: ${JSON.stringify(status)}</p>
+<p>status: "error"</p>
 <p>detail: ${JSON.stringify(detail || "(none)")}</p>
 <button id="closebtn">Close</button>
 <script>
   if (window.opener) {
     window.opener.postMessage(
-      { source: "explori-oauth", status: ${JSON.stringify(status)}, redirectUrl: ${JSON.stringify(redirectUrl || "")} },
+      { source: "explori-oauth", status: "error", redirectUrl: "" },
       "*"
     );
   }
