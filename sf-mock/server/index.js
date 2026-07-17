@@ -3,11 +3,11 @@ require("dotenv").config();
 const path = require("path");
 const express = require("express");
 const session = require("express-session");
-const { verifySignedRequest } = require("./verifySignedRequest");
-const { buildCanvasRedirectUrl, extractParameters } = require("./canvasRedirect");
+const { buildCanvasRedirectUrl } = require("./canvasRedirect");
 const { renderSignInPage } = require("./auth/shared");
 const webServerFlow = require("./auth/webServerFlow");
 const userAgentFlow = require("./auth/userAgentFlow");
+const signedRequestFlow = require("./auth/signedRequest");
 const db = require("./db");
 
 const app = express();
@@ -60,44 +60,12 @@ app.get("/canvas", (req, res) => {
 app.use("/oauth/web-server", webServerFlow);
 app.use("/oauth/user-agent", userAgentFlow);
 
-// Legacy Salesforce Canvas posts here on load with a signed_request form field.
-// Verify it, then hand off to the SPA with enough context in the URL to
-// render the right Explori panel in iframe mode.
-//
-// Kept in place (untouched) while the OAuth flows above are being tested --
-// the Canvas app's Access Method setting decides which one Salesforce
-// actually calls, so this stays dormant once that's flipped to OAuth (Get).
-app.post("/canvas", (req, res) => {
-  let context;
-
-  if (process.env.SKIP_AUTH === "true") {
-    context = {
-      environment: {
-        parameters: { panel: "portfolio-pulse" },
-        record: { Id: "001000000000000", Name: "Mock Account" },
-      },
-      client: { instanceId: "mock" },
-    };
-  } else {
-    const signedRequest = req.body.signed_request;
-
-    if (!signedRequest) {
-      return res.status(401).send("Missing signed_request");
-    }
-    context = verifySignedRequest(signedRequest, process.env.CANVAS_CONSUMER_SECRET);
-    if (!context) {
-      return res.status(401).send("Invalid signed_request");
-    }
-  }
-
-  req.canvasContext = context;
-
-  const parameters = extractParameters(context);
-  console.log("[canvas] extracted parameters:", parameters);
-  const redirectUrl = buildCanvasRedirectUrl(parameters);
-  console.log("[canvas] redirecting to:", redirectUrl);
-  res.redirect(redirectUrl);
-});
+// Legacy signed_request (POST) authentication -- see server/auth/signedRequest.js
+// for the code-level detail. Kept in place while the OAuth flows above are
+// being tested; the Canvas app's Access Method setting decides which one
+// Salesforce actually calls, so this stays dormant once that's flipped to
+// OAuth (Get).
+app.use("/canvas", signedRequestFlow);
 
 app.get("/api/portfolio-pulse", async (req, res) => {
   try {
