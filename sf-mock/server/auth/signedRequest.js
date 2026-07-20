@@ -15,6 +15,7 @@ const router = express.Router();
 router.post("/", (req, res) => {
   let context;
 
+  // for the testing purpose only... skip authentication
   if (process.env.SKIP_AUTH === "true") {
     context = {
       environment: {
